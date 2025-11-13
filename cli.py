@@ -67,6 +67,7 @@ class CLIConfig:
     device: str
     torch_dtype: Any | None
 
+_CLI_DEFAULT_DEVICE = _default_device()
 
 _CLI_DEFAULT_DEVICE = _default_device()
 
@@ -222,21 +223,56 @@ class EmbeddingService:
         self._tokenizer = AutoTokenizer.from_pretrained(
             self.model_name, trust_remote_code=True
         )
-        model_kwargs: dict[str, Any] = {"trust_remote_code": True}
-        if self._torch_dtype is not None:
-            model_kwargs["torch_dtype"] = self._torch_dtype
+        model_kwargs: dict[str, Any] = {
+            "trust_remote_code": True,
+        }
 
         requested_device = self._device_preference
+        device_map: Any | None = None
+        resolved_device: str | None = None
+
         if requested_device == "auto":
-            model_kwargs["device_map"] = "auto"
-            self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
-            resolved_device = str(self._model.device)
-        else:
+            device_map = "auto"
+        elif requested_device.startswith("cuda"):
             resolved_device = _validate_device_choice(requested_device, torch)
-            self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
-            self._model.to(resolved_device)
-        self._resolved_device = resolved_device
-        if resolved_device.startswith("cuda"):
+            device_map = {"": resolved_device}
+        else:
+            resolved_device = requested_device
+
+        if device_map is not None:
+            model_kwargs["device_map"] = device_map
+            model_kwargs["low_cpu_mem_usage"] = True
+
+        self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
+
+        dtype = self._torch_dtype
+        if device_map is None:
+            to_kwargs: dict[str, Any] = {}
+            if resolved_device is not None:
+                to_kwargs["device"] = resolved_device
+            if dtype is not None:
+                to_kwargs["dtype"] = dtype
+            if to_kwargs:
+                self._model.to(**to_kwargs)
+        else:
+            if dtype is not None:
+                self._model.to(dtype=dtype)
+
+        def _infer_model_device() -> str | None:
+            device_attr = getattr(self._model, "device", None)
+            if device_attr is not None:
+                return str(device_attr)
+            hf_device_map = getattr(self._model, "hf_device_map", None)
+            if isinstance(hf_device_map, dict) and hf_device_map:
+                first_target = next(iter(hf_device_map.values()))
+                if isinstance(first_target, int):
+                    return f"cuda:{first_target}"
+                return str(first_target)
+            return resolved_device
+
+        inferred_device = _infer_model_device()
+        self._resolved_device = inferred_device
+        if inferred_device and inferred_device.startswith("cuda"):
             self._autocast_device_type = "cuda"
         self._model.eval()
         self._torch = torch
