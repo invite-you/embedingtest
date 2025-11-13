@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
 
@@ -15,6 +16,8 @@ from cli import (
     find_target_files,
     read_file,
     split_text_by_newline_or_sentence,
+    _torch_dtype_from_string,
+    _validate_device_choice,
 )
 
 
@@ -28,6 +31,8 @@ def test_find_target_files_returns_sorted_allowed_files(tmp_path: Path) -> None:
         allowed_extensions=(".txt",),
         preferred_encodings=("utf-8", "cp949"),
         embedding_model_name="dummy",
+        device="cpu",
+        torch_dtype=None,
     )
     file_a = tmp_path / "b" / "파일1.txt"
     file_b = tmp_path / "a" / "파일2.txt"
@@ -44,6 +49,8 @@ def test_find_target_files_rejects_disallowed_file(tmp_path: Path) -> None:
         allowed_extensions=(".txt",),
         preferred_encodings=("utf-8",),
         embedding_model_name="dummy",
+        device="cpu",
+        torch_dtype=None,
     )
     file_path = tmp_path / "sample.md"
     create_file(file_path, "마크다운 파일")
@@ -57,6 +64,8 @@ def test_read_file_retries_with_fallback_encodings(tmp_path: Path) -> None:
         allowed_extensions=(".txt",),
         preferred_encodings=("utf-8", "cp949"),
         embedding_model_name="dummy",
+        device="cpu",
+        torch_dtype=None,
     )
     file_path = tmp_path / "cp949.txt"
     file_path.write_bytes("한글".encode("cp949"))
@@ -107,3 +116,44 @@ def test_split_text_by_newline_or_sentence() -> None:
         "두 번째 문장입니다!",
         "세 번째 줄",
     ]
+
+
+def test_torch_dtype_from_string_allows_prefixed_value() -> None:
+    torch = pytest.importorskip("torch")
+
+    dtype = _torch_dtype_from_string("torch.float16")
+
+    assert dtype == torch.float16
+
+
+def test_torch_dtype_from_string_rejects_invalid_value() -> None:
+    pytest.importorskip("torch")
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        _torch_dtype_from_string("not_a_dtype")
+
+
+class _FakeCuda:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _FakeTorch:
+    def __init__(self, available: bool) -> None:
+        self.cuda = _FakeCuda(available)
+
+
+def test_validate_device_choice_accepts_cpu_even_without_cuda() -> None:
+    torch_stub = _FakeTorch(available=False)
+
+    assert _validate_device_choice("cpu", torch_stub) == "cpu"
+
+
+def test_validate_device_choice_rejects_missing_cuda() -> None:
+    torch_stub = _FakeTorch(available=False)
+
+    with pytest.raises(RuntimeError):
+        _validate_device_choice("cuda", torch_stub)

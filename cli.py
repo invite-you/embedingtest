@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime
 import json
 import re
 import time
 from pathlib import Path
-from typing import Iterable, List, Protocol, Sequence, Tuple
+from typing import Any, Iterable, List, Protocol, Sequence, Tuple
 
 
 def _normalize_extensions(extensions: Sequence[str]) -> tuple[str, ...]:
@@ -30,6 +31,32 @@ def _normalize_extensions(extensions: Sequence[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _default_device() -> str:
+    """가용한 CUDA가 없으면 CPU를 기본값으로 선택합니다."""
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():  # pragma: no cover - 환경 의존 코드
+            return "cuda"
+    except Exception:  # pragma: no cover - 방어적 코드
+        pass
+    return "cpu"
+
+
+def _default_torch_dtype(device: str) -> Any | None:
+    """디바이스 유형에 따라 적절한 기본 torch dtype을 고릅니다."""
+
+    try:
+        import torch
+
+        if device.startswith("cuda"):
+            return torch.float16
+        return torch.float32
+    except Exception:  # pragma: no cover - torch 미설치 환경 방어
+        return None
+
+
 @dataclass(frozen=True)
 class CLIConfig:
     """CLI 동작에 필요한 설정 모음입니다."""
@@ -37,13 +64,50 @@ class CLIConfig:
     allowed_extensions: tuple[str, ...]
     preferred_encodings: tuple[str, ...]
     embedding_model_name: str
+    device: str
+    torch_dtype: Any | None
 
+
+_CLI_DEFAULT_DEVICE = _default_device()
 
 CLI_CONFIG = CLIConfig(
     allowed_extensions=_normalize_extensions([".txt"]),
     preferred_encodings=("utf-8", "cp949"),
     embedding_model_name="qwen/qwen3-embedding-4b",
+    device=_CLI_DEFAULT_DEVICE,
+    torch_dtype=_default_torch_dtype(_CLI_DEFAULT_DEVICE),
 )
+
+
+def _validate_device_choice(device: str, torch_module: Any) -> str:
+    """지정된 디바이스가 사용 가능한지 확인합니다."""
+
+    if device.startswith("cuda") and not torch_module.cuda.is_available():
+        raise RuntimeError(
+            "CUDA 디바이스를 요청했지만 torch.cuda.is_available()이 False입니다."
+        )
+    return device
+
+
+def _torch_dtype_from_string(value: str) -> Any:
+    """문자열 입력을 torch dtype 객체로 변환합니다."""
+
+    try:
+        import torch
+    except ModuleNotFoundError as exc:  # pragma: no cover - torch 미설치 방어
+        raise argparse.ArgumentTypeError(
+            "torch 모듈을 찾을 수 없어 dtype을 지정할 수 없습니다."
+        ) from exc
+
+    normalized = value.strip()
+    if normalized.startswith("torch."):
+        normalized = normalized.split(".", 1)[1]
+    dtype = getattr(torch, normalized, None)
+    if dtype is None or not isinstance(dtype, torch.dtype):
+        raise argparse.ArgumentTypeError(
+            f"지원하지 않는 torch dtype입니다: {value}"
+        )
+    return dtype
 
 
 def _is_allowed_extension(path: Path, config: CLIConfig) -> bool:
@@ -132,11 +196,21 @@ class EmbeddingServiceProtocol(Protocol):
 class EmbeddingService:
     """Transformers 기반 임베딩 서비스 구현체입니다."""
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        device: str | None = None,
+        torch_dtype: Any | None = None,
+    ) -> None:
         self.model_name = model_name
         self._tokenizer = None
         self._model = None
         self._torch = None
+        self._device_preference = (device or "cpu").lower()
+        self._resolved_device: str | None = None
+        self._autocast_device_type: str | None = None
+        self._torch_dtype = torch_dtype
 
     def _ensure_model(self) -> None:
         if self._tokenizer is not None and self._model is not None:
@@ -148,9 +222,22 @@ class EmbeddingService:
         self._tokenizer = AutoTokenizer.from_pretrained(
             self.model_name, trust_remote_code=True
         )
-        self._model = AutoModel.from_pretrained(
-            self.model_name, trust_remote_code=True
-        )
+        model_kwargs: dict[str, Any] = {"trust_remote_code": True}
+        if self._torch_dtype is not None:
+            model_kwargs["torch_dtype"] = self._torch_dtype
+
+        requested_device = self._device_preference
+        if requested_device == "auto":
+            model_kwargs["device_map"] = "auto"
+            self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
+            resolved_device = str(self._model.device)
+        else:
+            resolved_device = _validate_device_choice(requested_device, torch)
+            self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
+            self._model.to(resolved_device)
+        self._resolved_device = resolved_device
+        if resolved_device.startswith("cuda"):
+            self._autocast_device_type = "cuda"
         self._model.eval()
         self._torch = torch
 
@@ -178,12 +265,24 @@ class EmbeddingService:
             truncation=True,
             max_length=512,
         )
+        if self._resolved_device is not None:
+            inputs = inputs.to(self._resolved_device)
 
         # 2) 추론 전용 실행
-        # - CLI에서는 학습이 아니라 추론만 수행하므로 `torch.no_grad()`로 감싸
-        #   불필요한 그래디언트 버퍼 생성을 막고 속도를 끌어올립니다.
-        with torch.no_grad():
-            outputs = self._model(**inputs)
+        # - `torch.inference_mode()`로 감싸 그래디언트를 완전히 비활성화합니다.
+        # - CUDA 디바이스라면 `torch.autocast`로 dtype을 줄여 메모리를 절약합니다.
+        if self._autocast_device_type:
+            autocast_kwargs: dict[str, Any] = {
+                "device_type": self._autocast_device_type,
+            }
+            if self._torch_dtype is not None:
+                autocast_kwargs["dtype"] = self._torch_dtype
+            autocast_context = torch.autocast(**autocast_kwargs)
+        else:
+            autocast_context = nullcontext()
+        with torch.inference_mode():
+            with autocast_context:
+                outputs = self._model(**inputs)
 
         # 3) 모델 출력 검증
         # - 신뢰할 수 없는 커스텀 모델도 사용할 수 있으므로 필수 필드가
@@ -342,15 +441,32 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="사용할 임베딩 모델 이름 (기본: config에 정의된 값)",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="임베딩 모델을 올릴 디바이스 (예: cpu, cuda, auto)",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=_torch_dtype_from_string,
+        default=None,
+        help="모델 및 autocast에 사용할 torch dtype (예: float16)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    updated_fields: dict[str, object] = {}
+    if args.model:
+        updated_fields["embedding_model_name"] = args.model
+    if args.device:
+        updated_fields["device"] = args.device
+    if args.dtype is not None:
+        updated_fields["torch_dtype"] = args.dtype
     effective_config = (
-        replace(CLI_CONFIG, embedding_model_name=args.model)
-        if args.model
-        else CLI_CONFIG
+        replace(CLI_CONFIG, **updated_fields) if updated_fields else CLI_CONFIG
     )
     try:
         files = find_target_files(args.path, config=effective_config)
@@ -363,7 +479,11 @@ def main() -> int:
         print(f"{args.path} 안에서 {allowed} 파일을 찾을 수 없습니다")
         return 1
 
-    embedding_service = EmbeddingService(effective_config.embedding_model_name)
+    embedding_service = EmbeddingService(
+        effective_config.embedding_model_name,
+        device=effective_config.device,
+        torch_dtype=effective_config.torch_dtype,
+    )
     print_file_contents(
         files,
         embedding_service=embedding_service,
