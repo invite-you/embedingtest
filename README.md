@@ -23,6 +23,7 @@ python cli.py data
 * `--model` 옵션으로 Hugging Face 모델 이름을 바꿀 수 있습니다.
 * `--device`로 임베딩 모델을 올릴 디바이스(`cpu`, `cuda`, `auto`)를 지정해 CPU·GPU 간 전환을 강제할 수 있습니다.
 * `--dtype`에 `float16`, `torch.float32` 등 torch dtype을 넘기면 모델 로딩과 `torch.autocast`가 동일한 dtype으로 맞춰집니다.
+* 임베딩 단계에서는 `StageTimer`가 토큰화·디바이스 전송·추론·후처리까지 세부 타임스템프(Δ/Σ 시간)를 출력해 병목 지점을 즉시 확인할 수 있습니다.
 * 허용된 확장자 파일이 없거나 존재하지 않는 경로를 지정하면 오류 메시지를 반환합니다.
 
 ### 설정값 커스터마이징

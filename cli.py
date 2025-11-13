@@ -67,7 +67,6 @@ class CLIConfig:
     device: str
     torch_dtype: Any | None
 
-_CLI_DEFAULT_DEVICE = _default_device()
 
 _CLI_DEFAULT_DEVICE = _default_device()
 
@@ -283,65 +282,78 @@ class EmbeddingService:
         if any(not text.strip() for text in texts):
             raise ValueError("공백만 있는 텍스트는 임베딩할 수 없습니다.")
 
-        self._ensure_model()
-        assert self._tokenizer is not None
-        assert self._model is not None
-        torch = self._torch
-        if torch is None:  # pragma: no cover - 방어적 코드
-            raise RuntimeError("PyTorch 모듈이 초기화되지 않았습니다.")
+        timer = StageTimer()
+        timer.mark("임베딩 단계 시작")
+        try:
+            self._ensure_model()
+            timer.mark("모델 준비 완료")
+            assert self._tokenizer is not None
+            assert self._model is not None
+            torch = self._torch
+            if torch is None:  # pragma: no cover - 방어적 코드
+                raise RuntimeError("PyTorch 모듈이 초기화되지 않았습니다.")
 
-        # 1) 토크나이저 전처리 (배치 입력)
-        # - 여러 문장을 한 번에 토큰화해 GPU/CPU 호출 횟수를 줄입니다.
-        # - `padding=True`로 가장 긴 문장에 맞춰 나머지에 패딩을 추가합니다.
-        # - `truncation=True`, `max_length=512`는 각 문장의 토큰 수 상한을 보장합니다.
-        inputs = self._tokenizer(
-            list(texts),
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=512,
-        )
-        if self._resolved_device is not None:
-            inputs = inputs.to(self._resolved_device)
+            # 1) 토크나이저 전처리 (배치 입력)
+            # - 여러 문장을 한 번에 토큰화해 GPU/CPU 호출 횟수를 줄입니다.
+            # - `padding=True`로 가장 긴 문장에 맞춰 나머지에 패딩을 추가합니다.
+            # - `truncation=True`, `max_length=512`는 각 문장의 토큰 수 상한을 보장합니다.
+            inputs = self._tokenizer(
+                list(texts),
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            )
+            timer.mark("토큰화 완료")
+            if self._resolved_device is not None:
+                inputs = inputs.to(self._resolved_device)
+                timer.mark("디바이스 전송 완료")
 
-        # 2) 추론 전용 실행
-        # - `torch.inference_mode()`로 감싸 그래디언트를 완전히 비활성화합니다.
-        # - CUDA 디바이스라면 `torch.autocast`로 dtype을 줄여 메모리를 절약합니다.
-        if self._autocast_device_type:
-            autocast_kwargs: dict[str, Any] = {
-                "device_type": self._autocast_device_type,
-            }
-            if self._torch_dtype is not None:
-                autocast_kwargs["dtype"] = self._torch_dtype
-            autocast_context = torch.autocast(**autocast_kwargs)
-        else:
-            autocast_context = nullcontext()
-        with torch.inference_mode():
-            with autocast_context:
-                outputs = self._model(**inputs)
+            # 2) 추론 전용 실행
+            # - `torch.inference_mode()`로 감싸 그래디언트를 완전히 비활성화합니다.
+            # - CUDA 디바이스라면 `torch.autocast`로 dtype을 줄여 메모리를 절약합니다.
+            if self._autocast_device_type:
+                autocast_kwargs: dict[str, Any] = {
+                    "device_type": self._autocast_device_type,
+                }
+                if self._torch_dtype is not None:
+                    autocast_kwargs["dtype"] = self._torch_dtype
+                autocast_context = torch.autocast(**autocast_kwargs)
+            else:
+                autocast_context = nullcontext()
+            with torch.inference_mode():
+                with autocast_context:
+                    outputs = self._model(**inputs)
+            timer.mark("모델 추론 완료")
 
-        # 3) 모델 출력 검증
-        # - 신뢰할 수 없는 커스텀 모델도 사용할 수 있으므로 필수 필드가
-        #   없으면 명시적으로 실패하게 만들어 조기에 문제를 드러냅니다.
-        if not hasattr(outputs, "last_hidden_state"):
-            raise RuntimeError("모델 출력에 last_hidden_state가 없습니다.")
+            # 3) 모델 출력 검증
+            # - 신뢰할 수 없는 커스텀 모델도 사용할 수 있으므로 필수 필드가
+            #   없으면 명시적으로 실패하게 만들어 조기에 문제를 드러냅니다.
+            if not hasattr(outputs, "last_hidden_state"):
+                raise RuntimeError("모델 출력에 last_hidden_state가 없습니다.")
 
-        # 4) 마스킹 평균 풀링
-        # - `last_hidden_state`는 (배치, 토큰, 은닉차원) 형태의 텐서이며,
-        #   `attention_mask`로 실제 토큰만 남긴 뒤 토큰별 벡터를 평균 내면
-        #   문장 길이에 관계없는 대표 임베딩을 얻을 수 있습니다.
-        last_hidden_state = outputs.last_hidden_state
-        attention_mask = inputs["attention_mask"].unsqueeze(-1)
-        masked = last_hidden_state * attention_mask
-        sum_embeddings = masked.sum(dim=1)
-        token_counts = attention_mask.sum(dim=1).clamp(min=1)
-        mean_embeddings = sum_embeddings / token_counts
+            # 4) 마스킹 평균 풀링
+            # - `last_hidden_state`는 (배치, 토큰, 은닉차원) 형태의 텐서이며,
+            #   `attention_mask`로 실제 토큰만 남긴 뒤 토큰별 벡터를 평균 내면
+            #   문장 길이에 관계없는 대표 임베딩을 얻을 수 있습니다.
+            last_hidden_state = outputs.last_hidden_state
+            attention_mask = inputs["attention_mask"].unsqueeze(-1)
+            masked = last_hidden_state * attention_mask
+            sum_embeddings = masked.sum(dim=1)
+            token_counts = attention_mask.sum(dim=1).clamp(min=1)
+            mean_embeddings = sum_embeddings / token_counts
+            timer.mark("평균 풀링 완료")
 
-        # 5) L2 정규화
-        # - 각 벡터를 단위 길이로 맞추면 코사인 유사도 계산 시 안정성이 높고
-        #   문장 길이나 스케일 차이가 줄어듭니다.
-        normalized = torch.nn.functional.normalize(mean_embeddings, p=2, dim=1)
-        return normalized.tolist()
+            # 5) L2 정규화
+            # - 각 벡터를 단위 길이로 맞추면 코사인 유사도 계산 시 안정성이 높고
+            #   문장 길이나 스케일 차이가 줄어듭니다.
+            normalized = torch.nn.functional.normalize(mean_embeddings, p=2, dim=1)
+            timer.mark("정규화 완료")
+            vectors = normalized.tolist()
+            timer.mark("리스트 변환 완료")
+            return vectors
+        finally:
+            timer.mark("임베딩 단계 종료")
 
     def embed_text(self, text: str) -> List[float]:
         """단일 텍스트 입력을 위한 헬퍼입니다."""
