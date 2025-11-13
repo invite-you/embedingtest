@@ -67,6 +67,7 @@ class CLIConfig:
     device: str
     torch_dtype: Any | None
 
+_CLI_DEFAULT_DEVICE = _default_device()
 
 _CLI_DEFAULT_DEVICE = _default_device()
 
