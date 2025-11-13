@@ -31,7 +31,9 @@ def create_agent_config() -> AgentConfig:
     return AgentConfig(
         timeouts=TimeoutsConfig(per_file_minutes=50),
         limits=LimitsConfig(max_text_bytes=10_000),
-        clustering=ClusteringConfig(max_clusters=4, min_sentences=2),
+        clustering=ClusteringConfig(
+            max_clusters=4, min_sentences=2, min_cluster_size_for_output=2
+        ),
         context=ContextWindowConfig(sentences_before=1, sentences_after=1),
         llm=LLMConfig(max_tokens=2048),
         embedding=EmbeddingRuntimeConfig(batch_size=64),
@@ -45,7 +47,7 @@ def test_load_agent_config_reads_defaults(tmp_path: Path) -> None:
 {
   "timeouts": {"per_file_minutes": 60},
   "limits": {"max_text_bytes": 1000},
-  "clustering": {"max_clusters": 5, "min_sentences": 3},
+  "clustering": {"max_clusters": 5, "min_sentences": 3, "min_cluster_size_for_output": 2},
   "context": {"sentences_before": 1, "sentences_after": 2},
   "llm": {"max_tokens": 4096},
   "embedding": {"batch_size": 32}
@@ -64,7 +66,7 @@ def test_load_agent_config_missing_file_raises(tmp_path: Path) -> None:
         load_agent_config(tmp_path / "missing.yaml")
 
 
-def test_sentence_clusterer_returns_context_block() -> None:
+def test_sentence_clusterer_returns_representative_sentences() -> None:
     config = create_agent_config()
     clusterer = SentenceClusterer(config)
     sentences = ["첫 문장", "둘째 문장", "셋째 문장", "넷째 문장"]
@@ -73,7 +75,18 @@ def test_sentence_clusterer_returns_context_block() -> None:
     clusters = clusterer.build_clusters(sentences, embeddings)
 
     assert clusters
-    assert all(cluster.context_sentences for cluster in clusters)
+    assert all(cluster.representative_sentences for cluster in clusters)
+
+
+def test_sentence_clusterer_skips_weak_clusters() -> None:
+    config = create_agent_config()
+    clusterer = SentenceClusterer(config)
+    sentences = ["첫 문장", "둘째 문장"]
+    embeddings = [[0.0], [10.0]]
+
+    clusters = clusterer.build_clusters(sentences, embeddings)
+
+    assert clusters == []
 
 
 def test_document_cluster_agent_builds_representative_blocks(tmp_path: Path) -> None:
