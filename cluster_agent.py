@@ -7,17 +7,10 @@ import math
 import re
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, Sequence
 
-from agent_config import AgentConfig, load_agent_config
-from cli import (
-    CLI_CONFIG,
-    EmbeddingService,
-    EmbeddingServiceProtocol,
-    find_target_files,
-    read_file,
-    split_text_by_newline_or_sentence,
-)
+from agent_config import AgentConfig
+from text_processing import read_text_with_fallback, split_text_by_newline_or_sentence
 
 
 def _euclidean_distance_sq(a: Sequence[float], b: Sequence[float]) -> float:
@@ -39,6 +32,16 @@ class SentenceCluster:
     representative_sentence: str
     member_indices: list[int]
     context_sentences: list[str]
+
+
+class EmbeddingServiceProtocol(Protocol):
+    model_name: str
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        ...
+
+    def embed_text(self, text: str) -> list[float]:
+        ...
 
 
 class SentenceClusterer:
@@ -210,7 +213,7 @@ class DocumentClusterAgent:
         retry_count = 0
 
         try:
-            text = read_file(file_path)
+            text = read_text_with_fallback(file_path)
         except UnicodeDecodeError as exc:
             status = "ERROR"
             error_message = str(exc)
@@ -294,30 +297,8 @@ class DocumentClusterAgent:
         }
 
 
-def run_cluster_cli(target: Path) -> None:
-    """간단한 CLI를 통해 문장 군집 결과를 출력합니다."""
-
-    agent_config = load_agent_config()
-    embedding_service = EmbeddingService(
-        CLI_CONFIG.embedding_model_name,
-        device=CLI_CONFIG.device,
-        torch_dtype=CLI_CONFIG.torch_dtype,
-    )
-    processor = DocumentClusterAgent(agent_config, embedding_service)
-    files = find_target_files(target)
-    for index, file_path in enumerate(files, start=1):
-        result = processor.process_file(f"file-{index}", file_path)
-        print(f"===== {file_path} 결과 =====")
-        for block in result.get("representative_blocks", []):
-            print(
-                f"[클러스터 {block['cluster_id']}] "
-                f"{' | '.join(block['context_sentences'])}"
-            )
-
-
 __all__ = [
     "DocumentClusterAgent",
     "SentenceCluster",
     "SentenceClusterer",
-    "run_cluster_cli",
 ]
