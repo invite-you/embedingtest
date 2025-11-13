@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, replace
+from datetime import datetime
 import json
 import re
+import time
 from pathlib import Path
 from typing import Iterable, List, Protocol, Sequence, Tuple
 
@@ -90,6 +92,29 @@ def read_file(path: Path, config: CLIConfig = CLI_CONFIG) -> str:
 
 
 SegmentEmbedding = Tuple[str, Sequence[float]]
+
+
+def _now_timestamp() -> str:
+    """사람이 읽기 쉬운 현재 시각 문자열을 생성합니다."""
+
+    return datetime.now().isoformat(timespec="milliseconds")
+
+
+class StageTimer:
+    """단계별 경과 시간을 추적해 병목을 파악할 수 있도록 돕습니다."""
+
+    def __init__(self) -> None:
+        self._start = time.perf_counter()
+        self._last = self._start
+
+    def mark(self, stage: str) -> None:
+        """특정 단계가 끝났음을 타임스템프와 함께 출력합니다."""
+
+        current = time.perf_counter()
+        delta = current - self._last
+        total = current - self._start
+        self._last = current
+        print(f"[{_now_timestamp()}] {stage} (Δ{delta:.3f}s, Σ{total:.3f}s)")
 
 
 class EmbeddingServiceProtocol(Protocol):
@@ -245,16 +270,21 @@ def print_file_contents(
 
     for file_path in files:
         print(f"===== 파일: {file_path} =====")
+        timer = StageTimer()
+        timer.mark("처리 시작")
         try:
             content = read_file(file_path, config=config)
         except UnicodeDecodeError as exc:  # pragma: no cover - CLI 도우미
             print(f"[디코딩 오류] {file_path}을(를) 읽을 수 없습니다: {exc}")
+            timer.mark("파일 읽기 실패")
             continue
+        timer.mark("파일 읽기 완료")
         print(content)
         if not content.endswith("\n"):
             print()
 
         segments = split_text_by_newline_or_sentence(content)
+        timer.mark("텍스트 분할 완료")
 
         if not segments:
             print("[임베딩 생략] 비어 있는 파일입니다.")
@@ -265,17 +295,36 @@ def print_file_contents(
             segment_embeddings: list[SegmentEmbedding] = list(zip(segments, vectors))
         except ValueError as exc:
             print(f"[임베딩 오류] {exc}")
+            timer.mark("임베딩 실패")
             continue
         except RuntimeError as exc:
             print(f"[임베딩 오류] {exc}")
+            timer.mark("임베딩 실패")
             continue
+        timer.mark("임베딩 계산 완료")
 
         payload = build_embedding_payload(
             file_path, segment_embeddings, embedding_service.model_name
         )
+        timer.mark("페이로드 구성 완료")
 
-        print("[임베딩 결과]")
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print("[임베딩 요약]")
+        redacted_segments = [
+            {
+                "index": segment["index"],
+                "text": segment["text"],
+                "vector_length": segment["vector_length"],
+            }
+            for segment in payload["segments"]
+        ]
+        summary = {
+            "source_path": payload["source_path"],
+            "model_name": payload["model_name"],
+            "segment_count": payload["segment_count"],
+            "segments": redacted_segments,
+        }
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        timer.mark("요약 출력 완료")
 
 
 def parse_args() -> argparse.Namespace:
