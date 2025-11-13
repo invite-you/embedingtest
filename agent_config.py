@@ -33,6 +33,8 @@ class ClusteringConfig:
     max_clusters: int
     min_sentences: int
     min_cluster_size_for_output: int
+    representative_distance_ratio: float
+    max_representative_sentences: int
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,13 @@ def _require_positive_int(mapping: Mapping[str, Any], key: str) -> int:
     return value
 
 
+def _require_positive_float(mapping: Mapping[str, Any], key: str) -> float:
+    value = mapping.get(key)
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    raise AgentConfigError(f"`{key}`는 양의 실수여야 합니다.")
+
+
 def _load_section(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     section = mapping.get(key)
     if not isinstance(section, Mapping):
@@ -116,6 +125,12 @@ def load_agent_config(path: Path | None = None) -> AgentConfig:
         min_sentences=_require_positive_int(clustering_section, "min_sentences"),
         min_cluster_size_for_output=_require_positive_int(
             clustering_section, "min_cluster_size_for_output"
+        ),
+        representative_distance_ratio=_require_positive_float(
+            clustering_section, "representative_distance_ratio"
+        ),
+        max_representative_sentences=_require_positive_int(
+            clustering_section, "max_representative_sentences"
         ),
     )
     context = ContextWindowConfig(

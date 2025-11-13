@@ -7,7 +7,7 @@ import math
 import re
 import time
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, TypedDict
 
 from agent_config import AgentConfig
 from text_processing import read_text_with_fallback, split_text_by_newline_or_sentence
@@ -34,6 +34,12 @@ class SentenceCluster:
     representative_sentences: list[str]
 
 
+class _ClusterCandidate(TypedDict):
+    cluster_id: int
+    member_indices: list[int]
+    ranked_indices: list[int]
+
+
 class EmbeddingServiceProtocol(Protocol):
     model_name: str
 
@@ -49,6 +55,9 @@ class SentenceClusterer:
 
     def __init__(self, config: AgentConfig) -> None:
         self._cluster_cfg = config.clustering
+        self._max_representatives = max(
+            1, self._cluster_cfg.max_representative_sentences
+        )
 
     def build_clusters(
         self, sentences: Sequence[str], embeddings: Sequence[Sequence[float]]
@@ -130,7 +139,7 @@ class SentenceClusterer:
                     fallback_index = cluster_id % vector_count
                     centroids[cluster_id] = vector_list[fallback_index][:]
 
-        clusters: list[SentenceCluster] = []
+        cluster_candidates: list[_ClusterCandidate] = []
         for cluster_id in range(k):
             member_indices = [
                 idx for idx, assignment in enumerate(assignments) if assignment == cluster_id
@@ -143,15 +152,32 @@ class SentenceClusterer:
             )
             if not ranked_indices:
                 continue
-            representative_index = ranked_indices[0]
+            cluster_candidates.append(
+                _ClusterCandidate(
+                    cluster_id=cluster_id,
+                    member_indices=sorted(member_indices),
+                    ranked_indices=ranked_indices[: self._max_representatives],
+                )
+            )
+
+        selected_indices = self._select_unique_indices(
+            cluster_candidates, sentences
+        )
+        clusters: list[SentenceCluster] = []
+        for candidate in cluster_candidates:
+            indices = selected_indices.get(candidate["cluster_id"])
+            if not indices:
+                continue
+            representative_index = indices[0]
             clusters.append(
                 SentenceCluster(
-                    cluster_id=cluster_id,
+                    cluster_id=candidate["cluster_id"],
                     representative_index=representative_index,
                     representative_sentence=sentences[representative_index],
-                    member_indices=sorted(member_indices),
+                    member_indices=candidate["member_indices"],
                     representative_sentences=[
-                        sentences[idx] for idx in ranked_indices[:3]
+                        sentences[idx]
+                        for idx in indices[: self._max_representatives]
                     ],
                 )
             )
@@ -169,14 +195,53 @@ class SentenceClusterer:
             < self._cluster_cfg.min_cluster_size_for_output
         ):
             return []
-        return sorted(
-            member_indices,
-            key=lambda idx: (
+        scored_members = [
+            (
+                idx,
                 _euclidean_distance_sq(vectors[idx], centroid),
                 len(sentences[idx]),
-                idx,
+            )
+            for idx in member_indices
+        ]
+        scored_members.sort(key=lambda item: (item[1], item[2], item[0]))
+        best_distance = scored_members[0][1]
+        ratio = max(1.0, self._cluster_cfg.representative_distance_ratio)
+        threshold = best_distance * ratio
+        filtered: list[int] = []
+        for idx, distance, _ in scored_members:
+            if math.isclose(distance, best_distance) or distance <= threshold:
+                filtered.append(idx)
+        return filtered
+
+    def _select_unique_indices(
+        self,
+        candidates: Sequence[_ClusterCandidate],
+        sentences: Sequence[str],
+    ) -> dict[int, list[int]]:
+        used_sentences: set[str] = set()
+        selection: dict[int, list[int]] = {}
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda candidate: (
+                -len(candidate["member_indices"]),
+                candidate["cluster_id"],
             ),
         )
+        for candidate in sorted_candidates:
+            unique_indices: list[int] = []
+            for idx in candidate["ranked_indices"]:
+                sentence = sentences[idx].strip()
+                if not sentence:
+                    continue
+                if sentence in used_sentences:
+                    continue
+                used_sentences.add(sentence)
+                unique_indices.append(idx)
+                if len(unique_indices) >= self._max_representatives:
+                    break
+            if unique_indices:
+                selection[candidate["cluster_id"]] = unique_indices
+        return selection
 
 
 def _detect_language(text: str) -> str | None:
