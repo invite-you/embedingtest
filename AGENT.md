@@ -24,6 +24,22 @@ It runs fully on the user’s machine with local Qwen models.
 
 All thresholds (timeouts, limits, chunk sizes, cluster counts, etc.) must be configurable (e.g. `config/agent.yaml`) and must not be hard-coded.
 
+### Configuration
+
+Large production agents usually keep their knobs in declarative configs so they can be reloaded without redeploying binaries. Mirroring that approach, the agent **must** load defaults from `config/agent.yaml` (or an override supplied via CLI/env) and support hot-reload where possible. At a minimum document and validate the following keys:
+
+| Key | Description | Example |
+| --- | --- | --- |
+| `timeouts.per_file_minutes` | Upper bound for the entire extract→embed→LLM loop. | `50` |
+| `limits.max_text_bytes` | Raw text byte ceiling before returning `TEXT_TOO_LARGE`. | `5242880` |
+| `clustering.max_clusters` | Hard stop for auto-cluster counts. | `12` |
+| `clustering.min_sentences` | Below this, skip clustering and sample directly. | `8` |
+| `context.sentences_before` / `context.sentences_after` | Number of neighboring sentences added to each representative block. | `1` |
+| `llm.max_tokens` | Token budget handed to `qwen3-8b`. | `2048` |
+| `embedding.batch_size` | Sentences batched per embedding call (tune for GPU VRAM). | `64` |
+
+The agent should fail fast with a human-readable error if required config keys are missing, malformed, or outside safe ranges.
+
 ---
 
 ## Supported Inputs
@@ -82,8 +98,15 @@ Rules:
 
 * 텍스트 추출 실패, 이미지 전용 파일, 완전히 비어 있는 문서:
 
-  * `status = "NO_CONTENT"` or `"UNSUPPORTED"`
+* `status = "NO_CONTENT"` or `"UNSUPPORTED"`
   * `short_summary = null`, `tags = []`
+
+### Error handling & retry policy
+
+- Implement a bounded exponential backoff (e.g. max 2 retries) for transient extractor/embedding errors; record the final `retry_count` in the schema.
+- Classify failures deterministically so dashboards can alert on spikes (e.g. distinguish extractor crashes from GPU OOMs).
+- Emit actionable `error_message` strings that include the failing subsystem plus any upstream error codes/log IDs.
+- When timeouts fire, include elapsed time vs. configured budget in telemetry for later tuning.
 ---
 
 ## File Processing Pipeline (High Level)
@@ -150,6 +173,12 @@ For files that pass basic checks:
 
 All numeric knobs (cluster counts, context sentences, max tokens, etc.) must be read from configuration and easy to tune.
 
+### Logging, telemetry, and auditability
+
+- Emit structured logs (JSON) with per-file identifiers, durations for each pipeline stage, and GPU utilization snapshots so on-call engineers can debug regressions quickly.
+- Export Prometheus (or OpenTelemetry) metrics for throughput, average latency per stage, retry counts, and error categories. Expose health/readiness probes for orchestration platforms (e.g. Kubernetes).
+- Persist provenance metadata (config hash, model versions, git SHA) alongside outputs to guarantee reproducibility of summaries and embeddings.
+
 ---
 
 ## Folder / File Organization Strategies
@@ -174,3 +203,9 @@ Re-organization works over an **index** of already-processed files:
 ```
 
 The agent should support multiple strategies, for the UI to present 2–3 options.
+
+### Quality assurance & release readiness
+
+- Provide unit tests for text extraction adapters, schema validators, and clustering heuristics.
+- Add golden-file regression tests that feed representative documents (tiny memo, large PPT, empty doc) through the pipeline to ensure summaries remain stable across refactors.
+- Include linting/formatting checks plus a smoke-test CLI command (e.g. `agent-cli validate data/sample`) in CI to match the rigor seen in large GitHub-hosted agents.
