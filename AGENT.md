@@ -22,7 +22,7 @@ It runs fully on the user’s machine with local Qwen models.
 - Text size limit
   - After text extraction, if plain text > **5 MB**, mark file as `TEXT_TOO_LARGE` and skip summarization.
 
-All thresholds (timeouts, limits, chunk sizes, cluster counts, etc.) must be configurable (e.g. `config/agent.yaml`), not hard-coded.
+All thresholds (timeouts, limits, chunk sizes, cluster counts, etc.) must be configurable (e.g. `config/agent.yaml`) and must not be hard-coded.
 
 ---
 
