@@ -32,6 +32,7 @@ class LimitsConfig:
 class ClusteringConfig:
     max_clusters: int
     min_sentences: int
+    min_cluster_size_for_output: int
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,9 @@ def load_agent_config(path: Path | None = None) -> AgentConfig:
     clustering = ClusteringConfig(
         max_clusters=_require_positive_int(clustering_section, "max_clusters"),
         min_sentences=_require_positive_int(clustering_section, "min_sentences"),
+        min_cluster_size_for_output=_require_positive_int(
+            clustering_section, "min_cluster_size_for_output"
+        ),
     )
     context = ContextWindowConfig(
         sentences_before=_require_positive_int(

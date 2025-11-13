@@ -31,7 +31,7 @@ class SentenceCluster:
     representative_index: int
     representative_sentence: str
     member_indices: list[int]
-    context_sentences: list[str]
+    representative_sentences: list[str]
 
 
 class EmbeddingServiceProtocol(Protocol):
@@ -49,7 +49,6 @@ class SentenceClusterer:
 
     def __init__(self, config: AgentConfig) -> None:
         self._cluster_cfg = config.clustering
-        self._context_cfg = config.context
 
     def build_clusters(
         self, sentences: Sequence[str], embeddings: Sequence[Sequence[float]]
@@ -87,7 +86,7 @@ class SentenceClusterer:
                     representative_index=idx,
                     representative_sentence=sentences[idx],
                     member_indices=[idx],
-                    context_sentences=self._gather_context(idx, sentences),
+                    representative_sentences=[sentences[idx]],
                 )
             )
         return clusters
@@ -139,33 +138,45 @@ class SentenceClusterer:
             if not member_indices:
                 continue
             centroid = centroids[cluster_id]
-            representative_index = min(
-                member_indices,
-                key=lambda idx: (
-                    _euclidean_distance_sq(vector_list[idx], centroid),
-                    len(sentences[idx]),
-                    idx,
-                ),
+            ranked_indices = self._rank_member_indices(
+                member_indices, centroid, sentences, vector_list
             )
+            if not ranked_indices:
+                continue
+            representative_index = ranked_indices[0]
             clusters.append(
                 SentenceCluster(
                     cluster_id=cluster_id,
                     representative_index=representative_index,
                     representative_sentence=sentences[representative_index],
                     member_indices=sorted(member_indices),
-                    context_sentences=self._gather_context(
-                        representative_index, sentences
-                    ),
+                    representative_sentences=[
+                        sentences[idx] for idx in ranked_indices[:3]
+                    ],
                 )
             )
         return clusters
 
-    def _gather_context(self, index: int, sentences: Sequence[str]) -> list[str]:
-        before = self._context_cfg.sentences_before
-        after = self._context_cfg.sentences_after
-        start = max(0, index - before)
-        end = min(len(sentences), index + after + 1)
-        return list(sentences[start:end])
+    def _rank_member_indices(
+        self,
+        member_indices: Sequence[int],
+        centroid: Sequence[float],
+        sentences: Sequence[str],
+        vectors: Sequence[Sequence[float]],
+    ) -> list[int]:
+        if (
+            len(member_indices)
+            < self._cluster_cfg.min_cluster_size_for_output
+        ):
+            return []
+        return sorted(
+            member_indices,
+            key=lambda idx: (
+                _euclidean_distance_sq(vectors[idx], centroid),
+                len(sentences[idx]),
+                idx,
+            ),
+        )
 
 
 def _detect_language(text: str) -> str | None:
@@ -254,13 +265,14 @@ class DocumentClusterAgent:
                         "cluster_id": cluster.cluster_id,
                         "representative_index": cluster.representative_index,
                         "representative_sentence": cluster.representative_sentence,
-                        "context_sentences": cluster.context_sentences,
+                        "representative_sentences": cluster.representative_sentences,
                         "member_indices": cluster.member_indices,
                     }
                     for cluster in clusters
                 ]
                 summary_sentences = [
-                    " ".join(cluster.context_sentences) for cluster in clusters
+                    " ".join(cluster.representative_sentences)
+                    for cluster in clusters
                 ]
                 short_summary = " / ".join(
                     sentence for sentence in summary_sentences if sentence

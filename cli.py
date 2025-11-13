@@ -456,7 +456,7 @@ def _print_cluster_output(file_path: Path, result: dict) -> None:
     for block in blocks:
         cluster_id = block.get("cluster_id")
         print(f"[클러스터 {cluster_id}]")
-        for sentence in block.get("context_sentences", []):
+        for sentence in block.get("representative_sentences", []):
             print(f"- {sentence}")
         print()
 
@@ -482,7 +482,7 @@ def print_cluster_results(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="대표 문장 ±1줄 컨텍스트를 포함한 문장 군집 결과를 출력합니다.",
+        description="각 군집의 상위 대표 문장(최대 3개)을 출력합니다.",
     )
     parser.add_argument(
         "path",
