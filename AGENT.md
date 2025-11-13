@@ -206,6 +206,8 @@ The agent should support multiple strategies, for the UI to present 2–3 option
 
 ### Quality assurance & release readiness
 
+Large GitHub-hosted agents rarely treat testing as optional; the same expectation applies here. If a contributor cannot execute the full suite locally (e.g., due to GPU or licensing limits) they should still add or update the relevant cases and note the gap in their PR description so CI can cover it. At a minimum:
+
 - Provide unit tests for text extraction adapters, schema validators, and clustering heuristics.
 - Add golden-file regression tests that feed representative documents (tiny memo, large PPT, empty doc) through the pipeline to ensure summaries remain stable across refactors.
 - Include linting/formatting checks plus a smoke-test CLI command (e.g. `agent-cli validate data/sample`) in CI to match the rigor seen in large GitHub-hosted agents.
