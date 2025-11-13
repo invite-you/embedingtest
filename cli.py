@@ -1,8 +1,4 @@
-"""설정한 확장자만 읽어 출력하는 CLI입니다.
-
-하나의 파일 경로를 전달하면 해당 파일을 검증 후 출력하고,
-폴더 경로를 전달하면 재귀적으로 대상 확장자 파일을 찾아 사전순으로 출력합니다.
-"""
+"""텍스트 파일을 읽어 문장 임베딩과 군집 결과를 출력하는 CLI."""
 
 from __future__ import annotations
 
@@ -11,10 +7,13 @@ from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime
 import json
-import re
 import time
 from pathlib import Path
 from typing import Any, Iterable, List, Protocol, Sequence, Tuple
+
+from agent_config import AgentConfigError, load_agent_config
+from cluster_agent import DocumentClusterAgent
+from text_processing import read_text_with_fallback, split_text_by_newline_or_sentence
 
 
 def _normalize_extensions(extensions: Sequence[str]) -> tuple[str, ...]:
@@ -142,17 +141,7 @@ def find_target_files(target: Path, config: CLIConfig = CLI_CONFIG) -> List[Path
 def read_file(path: Path, config: CLIConfig = CLI_CONFIG) -> str:
     """설정된 인코딩 후보를 순회하며 텍스트를 반환합니다."""
 
-    last_error: UnicodeDecodeError | None = None
-    for encoding in config.preferred_encodings:
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeDecodeError as exc:
-            last_error = exc
-            continue
-
-    if last_error is not None:
-        raise last_error
-    raise UnicodeDecodeError("", b"", 0, 0, "사용 가능한 인코딩이 없습니다")
+    return read_text_with_fallback(path, encodings=config.preferred_encodings)
 
 
 SegmentEmbedding = Tuple[str, Sequence[float]]
@@ -385,29 +374,6 @@ def build_embedding_payload(
     }
 
 
-_SENTENCE_DELIMITER = re.compile(r"(?<=[.!?。？！])\s+")
-
-
-def split_text_by_newline_or_sentence(text: str) -> list[str]:
-    """줄바꿈 우선으로 분할하되 문장 부호를 기준으로도 세분화합니다."""
-
-    segments: list[str] = []
-    for line in text.splitlines():
-        cleaned_line = line.strip()
-        if not cleaned_line:
-            continue
-        # 문장 부호를 기준으로 추가 분리합니다. (마침표, 느낌표 등)
-        parts = _SENTENCE_DELIMITER.split(cleaned_line)
-        for part in parts:
-            cleaned_part = part.strip()
-            if cleaned_part:
-                segments.append(cleaned_part)
-
-    if not segments and text.strip():
-        segments.append(text.strip())
-    return segments
-
-
 def print_file_contents(
     files: Iterable[Path],
     embedding_service: EmbeddingServiceProtocol,
@@ -474,9 +440,49 @@ def print_file_contents(
         timer.mark("요약 출력 완료")
 
 
+def _print_cluster_output(file_path: Path, result: dict) -> None:
+    print(f"===== 파일: {file_path} =====")
+    status = result.get("status", "UNKNOWN")
+    if status != "OK":
+        message = result.get("error_message") or "처리 중 오류가 발생했습니다."
+        print(f"[{status}] {message}")
+        return
+
+    blocks = result.get("representative_blocks") or []
+    if not blocks:
+        print("[알림] 대표 문장을 찾지 못했습니다.")
+        return
+
+    for block in blocks:
+        cluster_id = block.get("cluster_id")
+        print(f"[클러스터 {cluster_id}]")
+        for sentence in block.get("context_sentences", []):
+            print(f"- {sentence}")
+        print()
+
+
+def print_cluster_results(
+    files: Iterable[Path],
+    *,
+    agent_config_path: Path | None = None,
+    embedding_service: EmbeddingServiceProtocol,
+) -> int:
+    try:
+        agent_config = load_agent_config(agent_config_path)
+    except AgentConfigError as exc:
+        print(f"설정 오류: {exc}")
+        return 1
+
+    processor = DocumentClusterAgent(agent_config, embedding_service)
+    for index, file_path in enumerate(files, start=1):
+        result = processor.process_file(f"file-{index}", file_path)
+        _print_cluster_output(file_path, result)
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="선택한 .txt 파일을 출력하고 Qwen 임베딩을 생성합니다.",
+        description="대표 문장 ±1줄 컨텍스트를 포함한 문장 군집 결과를 출력합니다.",
     )
     parser.add_argument(
         "path",
@@ -500,6 +506,12 @@ def parse_args() -> argparse.Namespace:
         type=_torch_dtype_from_string,
         default=None,
         help="모델 및 autocast에 사용할 torch dtype (예: float16)",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="agent 설정 파일 경로 (기본: config/agent.yaml)",
     )
     return parser.parse_args()
 
@@ -532,12 +544,11 @@ def main() -> int:
         device=effective_config.device,
         torch_dtype=effective_config.torch_dtype,
     )
-    print_file_contents(
+    return print_cluster_results(
         files,
+        agent_config_path=args.config,
         embedding_service=embedding_service,
-        config=effective_config,
     )
-    return 0
 
 
 if __name__ == "__main__":

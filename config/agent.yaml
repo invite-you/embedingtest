@@ -1,0 +1,8 @@
+{
+  "timeouts": {"per_file_minutes": 50},
+  "limits": {"max_text_bytes": 5242880},
+  "clustering": {"max_clusters": 12, "min_sentences": 8},
+  "context": {"sentences_before": 1, "sentences_after": 1},
+  "llm": {"max_tokens": 2048},
+  "embedding": {"batch_size": 64}
+}
