@@ -1,0 +1,92 @@
+from pathlib import Path
+
+import pytest
+
+from agent_config import (
+    AgentConfig,
+    AgentConfigError,
+    ClusteringConfig,
+    ContextWindowConfig,
+    EmbeddingRuntimeConfig,
+    LimitsConfig,
+    LLMConfig,
+    TimeoutsConfig,
+    load_agent_config,
+)
+from cluster_agent import DocumentClusterAgent, SentenceClusterer
+
+
+class _DummyEmbeddingService:
+    def __init__(self) -> None:
+        self.model_name = "dummy/model"
+
+    def embed_texts(self, texts):
+        return [[float(len(text))] for text in texts]
+
+    def embed_text(self, text):
+        return [float(len(text))]
+
+
+def create_agent_config() -> AgentConfig:
+    return AgentConfig(
+        timeouts=TimeoutsConfig(per_file_minutes=50),
+        limits=LimitsConfig(max_text_bytes=10_000),
+        clustering=ClusteringConfig(max_clusters=4, min_sentences=2),
+        context=ContextWindowConfig(sentences_before=1, sentences_after=1),
+        llm=LLMConfig(max_tokens=2048),
+        embedding=EmbeddingRuntimeConfig(batch_size=64),
+    )
+
+
+def test_load_agent_config_reads_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "agent.yaml"
+    config_path.write_text(
+        """
+{
+  "timeouts": {"per_file_minutes": 60},
+  "limits": {"max_text_bytes": 1000},
+  "clustering": {"max_clusters": 5, "min_sentences": 3},
+  "context": {"sentences_before": 1, "sentences_after": 2},
+  "llm": {"max_tokens": 4096},
+  "embedding": {"batch_size": 32}
+}
+""".strip()
+    )
+
+    config = load_agent_config(config_path)
+
+    assert config.timeouts.per_file_minutes == 60
+    assert config.context.sentences_after == 2
+
+
+def test_load_agent_config_missing_file_raises(tmp_path: Path) -> None:
+    with pytest.raises(AgentConfigError):
+        load_agent_config(tmp_path / "missing.yaml")
+
+
+def test_sentence_clusterer_returns_context_block() -> None:
+    config = create_agent_config()
+    clusterer = SentenceClusterer(config)
+    sentences = ["첫 문장", "둘째 문장", "셋째 문장", "넷째 문장"]
+    embeddings = [[float(i)] for i in range(len(sentences))]
+
+    clusters = clusterer.build_clusters(sentences, embeddings)
+
+    assert clusters
+    assert all(cluster.context_sentences for cluster in clusters)
+
+
+def test_document_cluster_agent_builds_representative_blocks(tmp_path: Path) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text(
+        "첫 문장입니다. 두 번째 문장입니다. 세 번째 문장입니다. 네 번째 문장입니다.",
+        encoding="utf-8",
+    )
+    agent = DocumentClusterAgent(create_agent_config(), _DummyEmbeddingService())
+
+    result = agent.process_file("file-1", file_path)
+
+    assert result["status"] == "OK"
+    assert result["representative_blocks"]
+    assert result["short_summary"]
+    assert result["embedding"] is not None

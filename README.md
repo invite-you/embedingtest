@@ -5,10 +5,13 @@
 `cli.py` 스크립트는 설정한 확장자 목록(기본값: `.txt`)에 해당하는 파일을 한 번에 출력하고,
 각 텍스트를 줄바꿈(우선) 또는 문장 부호 단위로 쪼갠 뒤
 [`qwen3-embedding-4b`](https://huggingface.co/qwen/qwen3-embedding-4b) 모델로 임베딩합니다.
+`cluster_agent.py`는 이렇게 얻은 문장 임베딩을 K-means 기반으로 군집화하고,
+각 클러스터에서 대표 문장을 골라 앞뒤 문맥까지 3줄 블록으로 묶어줍니다.
 
 ```bash
 python cli.py <파일_또는_폴더_경로>
 python cli.py data --model qwen/qwen2.5-embedding --device cpu --dtype float32
+python -c "from pathlib import Path; from cluster_agent import run_cluster_cli; run_cluster_cli(Path('data'))"  # 문장 군집 결과
 ```
 
 예시:
@@ -75,3 +78,16 @@ CLI가 `qwen3-embedding-4b` 같은 모델을 호출할 때는 다음 절차를 �
 5. **L2 정규화** – 마지막으로 벡터 길이를 1로 맞춰 코사인 유사도 기반 검색이나 군집화에서 안정적인 거리를 보장합니다. 길이가 다른 문서 간의 값 범위를 맞추는 효과도 있습니다.
 
 이 과정을 통해 길이가 다른 텍스트도 일관된 스케일의 임베딩으로 변환되며, 줄바꿈/문장 단위로 세분화된 JSON 벡터를 그대로 검색·클러스터링에 활용할 수 있습니다.
+## 문장 군집 요약
+
+`cluster_agent.DocumentClusterAgent`는 `config/agent.yaml`에서 로드한 구성값을 바탕으로
+다음 단계를 수행합니다.
+
+1. 파일의 텍스트를 읽고 5MB 이상이면 `TEXT_TOO_LARGE` 상태로 즉시 종료합니다.
+2. 문장 단위로 텍스트를 분할합니다. 문장이 부족하면 클러스터링 대신 균등 간격으로 표본을 추립니다.
+3. `EmbeddingService`로 문장별 임베딩을 얻고, `min(max_clusters, ceil(sqrt(n)))`개 K-means 클러스터를 생성합니다.
+4. 각 클러스터에서 중심에 가장 가까운 문장을 대표 문장으로 고르고, 앞뒤 1문장을 함께 묶어 3줄 블록을 만듭니다.
+5. 대표 블록을 합쳐 요약 문장을 만들고, 간단한 키워드·언어 정보를 붙입니다.
+
+`run_cluster_cli(Path('data'))`처럼 호출하면 각 파일별 대표 블록을 터미널에서 곧바로 확인할 수 있습니다.
+
