@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Iterable, Iterator, List, Sequence
 
 
 def _normalize_extensions(extensions: Sequence[str]) -> tuple[str, ...]:
@@ -85,19 +85,55 @@ def read_file(path: Path, config: CLIConfig = CLI_CONFIG) -> str:
     raise UnicodeDecodeError("", b"", 0, 0, "사용 가능한 인코딩이 없습니다")
 
 
-def print_file_contents(files: Iterable[Path], config: CLIConfig = CLI_CONFIG) -> None:
-    """각 파일 이름과 텍스트를 순서대로 출력합니다."""
+def stream_clean_lines(
+    path: Path, config: CLIConfig = CLI_CONFIG
+) -> Iterator[str]:
+    """파일을 스트리밍으로 읽으며 정제된 텍스트 라인을 제공합니다."""
 
+    last_error: UnicodeDecodeError | None = None
+    for encoding in config.preferred_encodings:
+        try:
+            with path.open("r", encoding=encoding) as file_obj:
+                previous_line: str | None = None
+                for raw_line in file_obj:
+                    normalized = raw_line.strip()
+                    if not normalized:
+                        continue
+                    if normalized == previous_line:
+                        continue
+                    previous_line = normalized
+                    yield normalized
+            return
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise UnicodeDecodeError("", b"", 0, 0, "사용 가능한 인코딩이 없습니다")
+
+
+def print_file_contents(
+    files: Iterable[Path], config: CLIConfig = CLI_CONFIG
+) -> dict[Path, list[str]]:
+    """각 파일 이름과 정제된 텍스트를 순서대로 출력하고 반환합니다."""
+
+    streamed_outputs: dict[Path, list[str]] = {}
     for file_path in files:
         print(f"===== 파일: {file_path} =====")
+        cleaned_chunks: list[str] = []
         try:
-            content = read_file(file_path, config=config)
+            for chunk in stream_clean_lines(file_path, config=config):
+                print(chunk)
+                cleaned_chunks.append(chunk)
         except UnicodeDecodeError as exc:  # pragma: no cover - CLI 도우미
             print(f"[디코딩 오류] {file_path}을(를) 읽을 수 없습니다: {exc}")
             continue
-        print(content)
-        if not content.endswith("\n"):
-            print()  # 빈 줄을 추가하여 파일 간 구분을 명확히 함
+
+        streamed_outputs[file_path] = cleaned_chunks
+        print()  # 파일 간 구분을 명확히 함
+
+    return streamed_outputs
 
 
 def parse_args() -> argparse.Namespace:
