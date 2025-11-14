@@ -9,7 +9,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from cli import CLIConfig, find_target_files, read_file
+from cli import (
+    CLIConfig,
+    find_target_files,
+    print_file_contents,
+    read_file,
+    stream_clean_lines,
+)
 
 
 def create_file(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -46,3 +52,39 @@ def test_read_file_retries_with_fallback_encodings(tmp_path: Path) -> None:
     content = read_file(file_path, config=config)
 
     assert content == "한글"
+
+
+def test_stream_clean_lines_normalizes_and_deduplicates(tmp_path: Path) -> None:
+    config = CLIConfig(allowed_extensions=(".txt",), preferred_encodings=("utf-8",))
+    file_path = tmp_path / "sample.txt"
+    create_file(
+        file_path,
+        """
+        첫 줄
+        첫 줄
+
+        둘째 줄
+        셋째 줄
+        셋째 줄
+        """.strip(),
+    )
+
+    lines = list(stream_clean_lines(file_path, config=config))
+
+    assert lines == ["첫 줄", "둘째 줄", "셋째 줄"]
+
+
+def test_print_file_contents_streams_and_returns_chunks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = CLIConfig(allowed_extensions=(".txt",), preferred_encodings=("utf-8",))
+    file_path = tmp_path / "sample.txt"
+    create_file(file_path, "라인1\n\n라인1\n라인2")
+
+    outputs = print_file_contents([file_path], config=config)
+    captured = capsys.readouterr().out
+
+    assert file_path in outputs
+    assert outputs[file_path] == ["라인1", "라인2"]
+    assert f"===== 파일: {file_path} =====" in captured
+    assert "라인1\n라인2\n" in captured
