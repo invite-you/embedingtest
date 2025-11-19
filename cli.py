@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import argparse
-import datetime
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Iterator, List, Sequence
 
@@ -22,6 +23,14 @@ SECTION_SPECS: tuple[tuple[str, float, float], ...] = (
     ("파일_중앙_구간", 0.33, 0.67),
     ("파일_끝_구간", 0.66, 1.0),
 )
+
+
+def _log_with_ts(label: str, *, elapsed: float | None = None) -> None:
+    """HH:MM:SS 타임스탬프와 선택적 경과 시간을 포함해 로그를 출력합니다."""
+
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    duration = f" (elapsed: {elapsed:.3f}s)" if elapsed is not None else ""
+    print(f"[{timestamp}] {label}{duration}")
 
 
 def _normalize_extensions(extensions: Sequence[str]) -> tuple[str, ...]:
@@ -253,7 +262,7 @@ def classify_file(
     prompt_budget = _calculate_prompt_budget(max_input_tokens)
     prompt = build_classification_prompt(path, lines, max_prompt_chars=prompt_budget)
     if debug_llm_prompt:
-        timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+        timestamp = datetime.now().isoformat(timespec="seconds")
         print(f"[LLM 프롬프트 {timestamp}]\n{prompt}\n")
     return llm_client.generate(prompt)
 
@@ -265,25 +274,37 @@ def print_file_contents(
     *,
     debug_llm_prompt: bool = False,
 ) -> dict[Path, FileStreamResult]:
-    """각 파일 이름과 정제된 텍스트를 순서대로 출력하고 반환합니다."""
+    """각 파일 이름과 정제된 텍스트를 순서대로 출력하고 반환합니다.
+
+    주요 단계는 HH:MM:SS 타임스탬프와 경과 시간을 포함한 로그로 안내됩니다.
+    """
 
     streamed_outputs: dict[Path, FileStreamResult] = {}
     for file_path in files:
         print(f"===== 파일: {file_path} =====")
         cleaned_chunks: list[str] = []
+        stream_start = time.perf_counter()
+        _log_with_ts(f"텍스트 정제 시작: {file_path}")
         try:
             for chunk in stream_clean_lines(file_path, config=config):
                 print(chunk)
                 cleaned_chunks.append(chunk)
         except UnicodeDecodeError as exc:  # pragma: no cover - CLI 도우미
+            elapsed = time.perf_counter() - stream_start
+            _log_with_ts(f"텍스트 정제 실패: {file_path}", elapsed=elapsed)
             print(f"[디코딩 오류] {file_path}을(를) 읽을 수 없습니다: {exc}")
             continue
+        else:
+            elapsed = time.perf_counter() - stream_start
+            _log_with_ts(f"텍스트 정제 완료: {file_path}", elapsed=elapsed)
 
         classification: str | None = None
         if (
             llm_client is not None
             and len(cleaned_chunks) >= config.min_lines_for_classification
         ):
+            classify_start = time.perf_counter()
+            _log_with_ts(f"LLM 분류 시작: {file_path}")
             try:
                 classification = classify_file(
                     file_path,
@@ -292,8 +313,12 @@ def print_file_contents(
                     debug_llm_prompt=debug_llm_prompt,
                 )
             except TransformerClientError as exc:  # pragma: no cover - CLI 도우미
+                elapsed = time.perf_counter() - classify_start
+                _log_with_ts(f"LLM 분류 실패: {file_path}", elapsed=elapsed)
                 print(f"[LLM 오류] {exc}")
             else:
+                elapsed = time.perf_counter() - classify_start
+                _log_with_ts(f"LLM 분류 완료: {file_path}", elapsed=elapsed)
                 if classification:
                     print(f"[LLM 분류] {classification}")
 
