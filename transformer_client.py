@@ -21,6 +21,8 @@ class TransformerClientConfig:
     max_new_tokens: int = 128
     temperature: float = 0.1
     top_p: float = 0.95
+    # Qwen3-2507 계열은 공식 문서 기준 256K 토큰(=262,144)을 처리할 수 있다.
+    max_input_tokens: int = 262_144
 
 
 class TransformerClient:
