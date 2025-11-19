@@ -1,4 +1,4 @@
-"""Qwen3-4b 호출을 담당하는 경량 래퍼."""
+"""Qwen/Qwen3-4B-Instruct-2507 호출을 담당하는 경량 래퍼."""
 
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ class SupportsGenerate(Protocol):
 
 @dataclass(frozen=True)
 class TransformerClientConfig:
-    model_name: str = "qwen3-4b"
+    model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
     max_new_tokens: int = 128
     temperature: float = 0.1
     top_p: float = 0.95
 
 
 class TransformerClient:
-    """transformers 파이프라인을 통한 Qwen3-4b 호출 래퍼."""
+    """transformers 파이프라인을 통한 Qwen/Qwen3-4B-Instruct-2507 호출 래퍼."""
 
     def __init__(self, config: TransformerClientConfig | None = None):
         self.config = config or TransformerClientConfig()

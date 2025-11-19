@@ -143,13 +143,14 @@ def _truncate_excerpt(lines: Sequence[str], max_chars: int = 1200) -> str:
 
 
 def build_classification_prompt(path: Path, lines: Sequence[str]) -> str:
-    """Qwen3-4b에게 분류 프롬프트를 구성합니다."""
+    """Qwen/Qwen3-4B-Instruct-2507에게 분류 프롬프트를 구성합니다."""
 
     excerpt = _truncate_excerpt(lines)
     return (
         "주어진 텍스트를 읽고 어떤 파일인지 설명하세요.\n"
         "주어진 텍스트는 파일의 첫 부분의 일부입니다.\n"
         "응답은 이 파일의 내용을 이해할 수 있는 설명이면 충분하며 형식은 고정되어 있지 않습니다.\n"
+        "항상 완전한 문장으로 답변하고 자연스러운 종결어미와 문장부호로 마무리하세요.\n"
         "필요 시 추가 맥락을 한두 문장 이내로 덧붙이세요.\n"
         f"파일 경로: {path}\n\n"
         "[내용]\n"
@@ -227,7 +228,10 @@ def main() -> int:
     try:
         llm_client = TransformerClient()
     except TransformerClientError as exc:  # pragma: no cover - 런타임 의존성
-        print(f"[경고] Qwen3-4b를 초기화할 수 없어 분류를 건너뜁니다: {exc}")
+        print(
+            "[경고] Qwen/Qwen3-4B-Instruct-2507를 초기화할 수 없어 분류를 건너뜁니다: "
+            f"{exc}"
+        )
     try:
         files = find_target_files(args.path)
     except (FileNotFoundError, ValueError) as exc:
