@@ -56,13 +56,34 @@ class TransformerClient:
 
     def generate(self, prompt: str) -> str:
         generator = self._load_pipeline()
-        outputs = generator(
-            prompt,
-            max_new_tokens=self.config.max_new_tokens,
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            do_sample=False,
-        )
+        tokenizer = getattr(generator, "tokenizer", None)
+        eos_token_id = None
+        pad_token_id = None
+        if tokenizer is not None:
+            eos_token_id = getattr(tokenizer, "eos_token_id", None)
+            pad_token_id = getattr(tokenizer, "pad_token_id", None)
+            # Qwen 시리즈는 `<|im_end|>` 토큰으로 응답을 닫는다. 토크나이저에 EOS/Pad가
+            # 비어 있다면 수동으로 매핑해 모델이 해당 토큰을 생성했을 때 멈추도록 한다.
+            convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+            if eos_token_id is None and convert is not None:
+                for token in ("<|im_end|>", "</s>"):
+                    token_id = convert(token)
+                    if token_id is not None and token_id >= 0:
+                        eos_token_id = token_id
+                        break
+            if pad_token_id is None:
+                pad_token_id = eos_token_id
+        generation_kwargs: dict[str, Any] = {
+            "max_new_tokens": self.config.max_new_tokens,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "do_sample": False,
+        }
+        if eos_token_id is not None:
+            generation_kwargs["eos_token_id"] = eos_token_id
+        if pad_token_id is not None:
+            generation_kwargs["pad_token_id"] = pad_token_id
+        outputs = generator(prompt, **generation_kwargs)
         if not outputs:
             raise TransformerClientError("LLM 응답이 비어 있습니다")
         generated = outputs[0].get("generated_text", "")
