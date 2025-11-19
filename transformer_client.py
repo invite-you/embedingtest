@@ -69,8 +69,9 @@ class TransformerClient:
 
     def generate(self, prompt: str) -> str:
         generator = self._load_pipeline()
+        formatted_prompt = self._apply_chat_template_if_available(prompt)
         first_response, truncated = self._invoke_generator(
-            generator, prompt, self.config.max_new_tokens
+            generator, formatted_prompt, self.config.max_new_tokens
         )
         if truncated:
             logger.warning(
@@ -80,7 +81,7 @@ class TransformerClient:
             retry_limit = self.config.truncation_retry_max_new_tokens
             if retry_limit and retry_limit > self.config.max_new_tokens:
                 second_response, second_truncated = self._invoke_generator(
-                    generator, prompt, retry_limit
+                    generator, formatted_prompt, retry_limit
                 )
                 if second_truncated:
                     return self._append_truncation_note(second_response, retry_limit)
@@ -91,7 +92,7 @@ class TransformerClient:
         return first_response
 
     def _invoke_generator(
-        self, generator: SupportsGenerate, prompt: str, max_new_tokens: int
+        self, generator: SupportsGenerate, prompt: Any, max_new_tokens: int
     ) -> tuple[str, bool]:
         outputs = generator(prompt, **self._build_generation_kwargs(max_new_tokens))
         if not outputs:
@@ -113,15 +114,51 @@ class TransformerClient:
             "return_full_text": False,
         }
 
-        eos_token_id = getattr(self._tokenizer, "eos_token_id", None)
-        if eos_token_id is not None:
-            kwargs["eos_token_id"] = eos_token_id
+        eos_token_ids = self._collect_eos_token_ids()
+        if eos_token_ids:
+            kwargs["eos_token_id"] = (
+                eos_token_ids if len(eos_token_ids) > 1 else eos_token_ids[0]
+            )
         pad_token_id = getattr(self._tokenizer, "pad_token_id", None)
         if pad_token_id is not None:
             kwargs["pad_token_id"] = pad_token_id
         if self.config.stop_strings:
             kwargs["stop_strings"] = list(self.config.stop_strings)
         return kwargs
+
+    def _collect_eos_token_ids(self) -> list[int]:
+        if self._tokenizer is None:
+            return []
+        ids: list[int] = []
+        for attr_name in ("eos_token_id", "im_end_id"):
+            value = getattr(self._tokenizer, attr_name, None)
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                for token in value:
+                    if isinstance(token, int) and token not in ids:
+                        ids.append(token)
+            elif isinstance(value, int) and value not in ids:
+                ids.append(value)
+        return ids
+
+    def _apply_chat_template_if_available(self, prompt: str) -> Any:
+        if self._tokenizer is None:
+            return prompt
+        apply_chat_template = getattr(self._tokenizer, "apply_chat_template", None)
+        if not callable(apply_chat_template):
+            return prompt
+        messages = [{"role": "user", "content": prompt}]
+        template_kwargs = {"add_generation_prompt": True}
+        try:
+            return apply_chat_template(
+                messages,
+                tokenize=False,
+                **template_kwargs,
+            )
+        except TypeError:
+            # 일부 토크나이저는 tokenize 인자를 지원하지 않는다.
+            return apply_chat_template(messages, **template_kwargs)
 
     def _extract_token_count(self, output: dict[str, Any], text: str) -> int:
         generated_tokens = output.get("generated_tokens")
