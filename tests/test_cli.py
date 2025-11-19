@@ -12,6 +12,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from cli import (
     CLIConfig,
     FileStreamResult,
+    PROMPT_INPUT_RATIO,
+    _calculate_prompt_budget,
     build_classification_prompt,
     find_target_files,
     print_file_contents,
@@ -125,25 +127,41 @@ def test_print_file_contents_invokes_llm_when_threshold_met(
     assert llm.prompts and llm.prompts[0].startswith(
         "주어진 텍스트를 읽고 어떤 파일인지 설명하세요."
     )
-    assert (
-        "응답은 이 파일의 내용을 이해할 수 있는 설명이면 충분하며 형식은 고정되어 있지 않습니다."
-        in llm.prompts[0]
-    )
-    assert "필요 시 추가 맥락을 한두 문장 이내로 덧붙이세요." in llm.prompts[0]
+    assert "[[구간:" in llm.prompts[0]
+    assert "중간에 끊기지 않도록" in llm.prompts[0]
+    assert "타임라인" in llm.prompts[0]
+    assert "HH:MM:SS" in llm.prompts[0]
     assert "첫 줄" in llm.prompts[0]
     assert f"[LLM 분류] {llm.response}" in captured
 
 
 def test_build_classification_prompt_contains_metadata(tmp_path: Path) -> None:
     file_path = tmp_path / "a.txt"
-    lines = ["첫 줄", "둘째 줄"]
+    lines = [f"라인 {i}" for i in range(1, 10)]
 
-    prompt = build_classification_prompt(file_path, lines)
+    prompt = build_classification_prompt(file_path, lines, max_prompt_chars=30)
 
     assert str(file_path) in prompt
-    assert "첫 줄" in prompt
-    assert "주어진 텍스트는 파일의 첫 부분의 일부입니다." in prompt
-    assert (
-        "응답은 이 파일의 내용을 이해할 수 있는 설명이면 충분하며 형식은 고정되어 있지 않습니다."
-        in prompt
-    )
+    assert "라인 1" in prompt
+    assert "[[구간:파일_시작_구간]]" in prompt
+    assert "[[구간:파일_중앙_구간]]" in prompt
+    assert "[[구간:파일_끝_구간]]" in prompt
+
+
+def test_build_classification_prompt_uses_full_text_when_within_budget(
+    tmp_path: Path,
+) -> None:
+    file_path = tmp_path / "b.txt"
+    lines = ["짧은", "본문"]
+
+    prompt = build_classification_prompt(file_path, lines, max_prompt_chars=10_000)
+
+    assert "[[구간:파일_전체_구간]]" in prompt
+    assert "짧은" in prompt and "본문" in prompt
+
+
+def test_calculate_prompt_budget_respects_ratio() -> None:
+    max_tokens = 262_144
+    budget = _calculate_prompt_budget(max_tokens)
+
+    assert budget == int(max_tokens * PROMPT_INPUT_RATIO)
