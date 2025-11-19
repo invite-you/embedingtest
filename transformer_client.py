@@ -23,8 +23,6 @@ class SupportsGenerate(Protocol):
 class TransformerClientConfig:
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
     max_new_tokens: int = 128
-    temperature: float = 0.1
-    top_p: float = 0.95
     stop_strings: tuple[str, ...] = ()
     truncation_retry_max_new_tokens: int | None = None
     truncation_suffix: str = "(응답이 설정된 최대 토큰 {limit}에 도달하여 잘렸을 수 있습니다)"
@@ -111,8 +109,6 @@ class TransformerClient:
 
         kwargs: dict[str, Any] = {
             "max_new_tokens": max_new_tokens,
-            "temperature": self.config.temperature,
-            "top_p": self.config.top_p,
             "do_sample": False,
             "return_full_text": False,
         }
