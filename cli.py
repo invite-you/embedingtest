@@ -281,30 +281,46 @@ def print_file_contents(
 
     streamed_outputs: dict[Path, FileStreamResult] = {}
     for file_path in files:
+        overall_start = time.perf_counter()
+        _log_with_ts(f"파일 처리 시작: {file_path}")
         print(f"===== 파일: {file_path} =====")
+
         cleaned_chunks: list[str] = []
         stream_start = time.perf_counter()
-        _log_with_ts(f"텍스트 정제 시작: {file_path}")
+        _log_with_ts(f"텍스트 정제 단계 시작: {file_path}")
         try:
             for chunk in stream_clean_lines(file_path, config=config):
                 print(chunk)
                 cleaned_chunks.append(chunk)
         except UnicodeDecodeError as exc:  # pragma: no cover - CLI 도우미
             elapsed = time.perf_counter() - stream_start
-            _log_with_ts(f"텍스트 정제 실패: {file_path}", elapsed=elapsed)
+            _log_with_ts(f"텍스트 정제 단계 실패: {file_path}", elapsed=elapsed)
             print(f"[디코딩 오류] {file_path}을(를) 읽을 수 없습니다: {exc}")
+            _log_with_ts(
+                f"파일 처리 종료(텍스트 정제 실패): {file_path}",
+                elapsed=time.perf_counter() - overall_start,
+            )
             continue
         else:
             elapsed = time.perf_counter() - stream_start
-            _log_with_ts(f"텍스트 정제 완료: {file_path}", elapsed=elapsed)
+            _log_with_ts(
+                f"텍스트 정제 단계 완료: {file_path} (라인 {len(cleaned_chunks)}개)",
+                elapsed=elapsed,
+            )
 
         classification: str | None = None
-        if (
-            llm_client is not None
-            and len(cleaned_chunks) >= config.min_lines_for_classification
-        ):
+        if not cleaned_chunks:
+            _log_with_ts(f"LLM 분류 건너뜀: 정제된 텍스트 없음 ({file_path})")
+        elif llm_client is None:
+            _log_with_ts(f"LLM 분류 건너뜀: 클라이언트 비활성화 ({file_path})")
+        elif len(cleaned_chunks) < config.min_lines_for_classification:
+            _log_with_ts(
+                "LLM 분류 건너뜀: 라인 수 부족 "
+                f"({len(cleaned_chunks)}/{config.min_lines_for_classification}) ({file_path})"
+            )
+        else:
             classify_start = time.perf_counter()
-            _log_with_ts(f"LLM 분류 시작: {file_path}")
+            _log_with_ts(f"LLM 분류 단계 시작: {file_path}")
             try:
                 classification = classify_file(
                     file_path,
@@ -314,17 +330,25 @@ def print_file_contents(
                 )
             except TransformerClientError as exc:  # pragma: no cover - CLI 도우미
                 elapsed = time.perf_counter() - classify_start
-                _log_with_ts(f"LLM 분류 실패: {file_path}", elapsed=elapsed)
+                _log_with_ts(f"LLM 분류 단계 실패: {file_path}", elapsed=elapsed)
                 print(f"[LLM 오류] {exc}")
             else:
                 elapsed = time.perf_counter() - classify_start
-                _log_with_ts(f"LLM 분류 완료: {file_path}", elapsed=elapsed)
+                status = (
+                    f"LLM 분류 단계 완료: {file_path}"
+                    if classification
+                    else f"LLM 분류 단계 완료: 결과 없음 ({file_path})"
+                )
+                _log_with_ts(status, elapsed=elapsed)
                 if classification:
                     print(f"[LLM 분류] {classification}")
 
         streamed_outputs[file_path] = FileStreamResult(
             cleaned_chunks=cleaned_chunks,
             classification=classification,
+        )
+        _log_with_ts(
+            f"파일 처리 완료: {file_path}", elapsed=time.perf_counter() - overall_start
         )
         print()  # 파일 간 구분을 명확히 함
 
