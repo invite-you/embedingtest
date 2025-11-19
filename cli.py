@@ -8,10 +8,50 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, List, Sequence
+from time import perf_counter
+from typing import Any, Callable, Iterable, Iterator, List, Sequence
 
 from transformer_client import TransformerClient, TransformerClientError
+
+
+StageLogSink = Callable[[str], None]
+
+
+def _emit_stage_log(payload: dict[str, Any], sink: StageLogSink | None = None) -> None:
+    """공통 포맷의 JSON 로그를 출력합니다."""
+
+    serialized = json.dumps(payload, ensure_ascii=False)
+    (sink or print)(serialized)
+
+
+def log_stage(
+    stage: str,
+    *,
+    file_id: str | None = None,
+    start_wall: datetime | None = None,
+    start_perf: float | None = None,
+    sink: StageLogSink | None = None,
+    **context: Any,
+) -> None:
+    """단일 단계의 종료 시점을 기록합니다."""
+
+    end_wall = datetime.now(timezone.utc)
+    payload: dict[str, Any] = {
+        "timestamp": end_wall.isoformat(),
+        "stage": stage,
+        "file": file_id,
+    }
+    if start_wall is not None:
+        payload["start_at"] = start_wall.isoformat()
+        payload["end_at"] = end_wall.isoformat()
+    if start_perf is not None:
+        payload["elapsed_ms"] = round((perf_counter() - start_perf) * 1000, 3)
+    if context:
+        payload.update(context)
+    _emit_stage_log(payload, sink=sink)
 
 
 def _normalize_extensions(extensions: Sequence[str]) -> tuple[str, ...]:
@@ -180,24 +220,79 @@ def print_file_contents(
     for file_path in files:
         print(f"===== 파일: {file_path} =====")
         cleaned_chunks: list[str] = []
+        file_id = file_path.as_posix()
+        decode_error: UnicodeDecodeError | None = None
+        decoding_start_wall = datetime.now(timezone.utc)
+        decoding_start_perf = perf_counter()
         try:
             for chunk in stream_clean_lines(file_path, config=config):
-                print(chunk)
                 cleaned_chunks.append(chunk)
         except UnicodeDecodeError as exc:  # pragma: no cover - CLI 도우미
-            print(f"[디코딩 오류] {file_path}을(를) 읽을 수 없습니다: {exc}")
+            decode_error = exc
+            log_stage(
+                "decoding",
+                file_id=file_id,
+                start_wall=decoding_start_wall,
+                start_perf=decoding_start_perf,
+                status="error",
+                error=str(exc),
+            )
+        else:
+            log_stage(
+                "decoding",
+                file_id=file_id,
+                start_wall=decoding_start_wall,
+                start_perf=decoding_start_perf,
+                status="ok",
+                line_count=len(cleaned_chunks),
+            )
+        if decode_error is not None:
+            print(f"[디코딩 오류] {file_path}을(를) 읽을 수 없습니다: {decode_error}")
+            print()
             continue
+
+        streaming_start_wall = datetime.now(timezone.utc)
+        streaming_start_perf = perf_counter()
+        for chunk in cleaned_chunks:
+            print(chunk)
+        log_stage(
+            "streaming",
+            file_id=file_id,
+            start_wall=streaming_start_wall,
+            start_perf=streaming_start_perf,
+            status="ok",
+            line_count=len(cleaned_chunks),
+        )
 
         classification: str | None = None
         if (
             llm_client is not None
             and len(cleaned_chunks) >= config.min_lines_for_classification
         ):
+            llm_start_wall = datetime.now(timezone.utc)
+            llm_start_perf = perf_counter()
             try:
-                classification = classify_file(file_path, cleaned_chunks, llm_client)
+                classification = classify_file(
+                    file_path, cleaned_chunks, llm_client
+                )
             except TransformerClientError as exc:  # pragma: no cover - CLI 도우미
+                log_stage(
+                    "llm_classification",
+                    file_id=file_id,
+                    start_wall=llm_start_wall,
+                    start_perf=llm_start_perf,
+                    status="error",
+                    error=str(exc),
+                )
                 print(f"[LLM 오류] {exc}")
             else:
+                log_stage(
+                    "llm_classification",
+                    file_id=file_id,
+                    start_wall=llm_start_wall,
+                    start_perf=llm_start_perf,
+                    status="ok",
+                )
                 if classification:
                     print(f"[LLM 분류] {classification}")
 
@@ -232,10 +327,37 @@ def main() -> int:
             "[경고] Qwen/Qwen3-4B-Instruct-2507를 초기화할 수 없어 분류를 건너뜁니다: "
             f"{exc}"
         )
+    files: List[Path] = []
+    discovery_error: Exception | None = None
+    discovery_start_wall = datetime.now(timezone.utc)
+    discovery_start_perf = perf_counter()
+    target_path = args.path.as_posix()
     try:
         files = find_target_files(args.path)
     except (FileNotFoundError, ValueError) as exc:
-        print(f"오류: {exc}")
+        discovery_error = exc
+        log_stage(
+            "discovery",
+            file_id=target_path,
+            start_wall=discovery_start_wall,
+            start_perf=discovery_start_perf,
+            target=target_path,
+            status="error",
+            error=str(exc),
+        )
+    else:
+        log_stage(
+            "discovery",
+            file_id=target_path,
+            start_wall=discovery_start_wall,
+            start_perf=discovery_start_perf,
+            target=target_path,
+            status="ok",
+            file_count=len(files),
+        )
+
+    if discovery_error is not None:
+        print(f"오류: {discovery_error}")
         return 1
 
     if not files:
