@@ -15,6 +15,7 @@ from cli import (
     PROMPT_INPUT_RATIO,
     _calculate_prompt_budget,
     build_classification_prompt,
+    classify_file,
     find_target_files,
     print_file_contents,
     read_file,
@@ -105,6 +106,33 @@ class DummyLLM:
     def generate(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return self.response
+
+
+def test_classify_file_logs_prompt_when_debug_enabled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file_path = tmp_path / "sample.txt"
+    lines = ["첫 줄", "둘째 줄", "셋째 줄"]
+    llm = DummyLLM("타임라인을 포함한 응답")
+
+    classify_file(file_path, lines, llm, debug_llm_prompt=True)
+    captured = capsys.readouterr().out
+
+    assert llm.prompts and llm.prompts[0] in captured
+    assert "[LLM 프롬프트" in captured
+
+
+def test_classify_file_keeps_stdout_clean_when_debug_disabled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file_path = tmp_path / "sample.txt"
+    lines = ["첫 줄", "둘째 줄", "셋째 줄"]
+    llm = DummyLLM("타임라인을 포함한 응답")
+
+    classify_file(file_path, lines, llm)
+    captured = capsys.readouterr().out
+
+    assert captured == ""
 
 
 def test_print_file_contents_invokes_llm_when_threshold_met(

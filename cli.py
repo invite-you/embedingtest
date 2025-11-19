@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, List, Sequence
@@ -243,12 +244,17 @@ def classify_file(
     path: Path,
     lines: Sequence[str],
     llm_client: TransformerClient,
+    *,
+    debug_llm_prompt: bool = False,
 ) -> str:
     """LLM을 호출해 분류 결과를 반환합니다."""
 
     max_input_tokens = getattr(getattr(llm_client, "config", None), "max_input_tokens", None)
     prompt_budget = _calculate_prompt_budget(max_input_tokens)
     prompt = build_classification_prompt(path, lines, max_prompt_chars=prompt_budget)
+    if debug_llm_prompt:
+        timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+        print(f"[LLM 프롬프트 {timestamp}]\n{prompt}\n")
     return llm_client.generate(prompt)
 
 
@@ -256,6 +262,8 @@ def print_file_contents(
     files: Iterable[Path],
     config: CLIConfig = CLI_CONFIG,
     llm_client: TransformerClient | None = None,
+    *,
+    debug_llm_prompt: bool = False,
 ) -> dict[Path, FileStreamResult]:
     """각 파일 이름과 정제된 텍스트를 순서대로 출력하고 반환합니다."""
 
@@ -277,7 +285,12 @@ def print_file_contents(
             and len(cleaned_chunks) >= config.min_lines_for_classification
         ):
             try:
-                classification = classify_file(file_path, cleaned_chunks, llm_client)
+                classification = classify_file(
+                    file_path,
+                    cleaned_chunks,
+                    llm_client,
+                    debug_llm_prompt=debug_llm_prompt,
+                )
             except TransformerClientError as exc:  # pragma: no cover - CLI 도우미
                 print(f"[LLM 오류] {exc}")
             else:
@@ -301,6 +314,11 @@ def parse_args() -> argparse.Namespace:
         "path",
         type=Path,
         help="단일 .txt 파일 경로 또는 .txt 파일을 포함한 폴더 경로",
+    )
+    parser.add_argument(
+        "--debug-llm-prompt",
+        action="store_true",
+        help="LLM 호출 전에 생성된 프롬프트 내용을 출력합니다.",
     )
     return parser.parse_args()
 
@@ -326,7 +344,11 @@ def main() -> int:
         print(f"{args.path} 안에서 {allowed} 파일을 찾을 수 없습니다")
         return 1
 
-    print_file_contents(files, llm_client=llm_client)
+    print_file_contents(
+        files,
+        llm_client=llm_client,
+        debug_llm_prompt=args.debug_llm_prompt,
+    )
     return 0
 
 
