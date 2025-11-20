@@ -20,6 +20,14 @@ from transformer_client import TransformerClient, TransformerClientError
 StageLogSink = Callable[[str], None]
 
 
+def _format_local_timestamp(dt: datetime | None = None) -> str:
+    """로컬 타임존 기준 짧은 형식의 타임스탬프를 반환합니다."""
+
+    if dt is None:
+        dt = datetime.now()
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _emit_stage_log(payload: dict[str, Any], sink: StageLogSink | None = None) -> None:
     """공통 포맷의 JSON 로그를 출력합니다."""
 
@@ -35,23 +43,28 @@ def log_stage(
     start_perf: float | None = None,
     sink: StageLogSink | None = None,
     **context: Any,
-) -> None:
+) -> dict[str, Any]:
     """단일 단계의 종료 시점을 기록합니다."""
 
     end_wall = datetime.now(timezone.utc)
+    local_end = _format_local_timestamp(end_wall)
     payload: dict[str, Any] = {
         "timestamp": end_wall.isoformat(),
+        "local_timestamp": local_end,
         "stage": stage,
         "file": file_id,
     }
     if start_wall is not None:
         payload["start_at"] = start_wall.isoformat()
         payload["end_at"] = end_wall.isoformat()
+        payload["local_start_at"] = _format_local_timestamp(start_wall)
+        payload["local_end_at"] = local_end
     if start_perf is not None:
         payload["elapsed_ms"] = round((perf_counter() - start_perf) * 1000, 3)
     if context:
         payload.update(context)
     _emit_stage_log(payload, sink=sink)
+    return payload
 
 
 def _normalize_extensions(extensions: Sequence[str]) -> tuple[str, ...]:
@@ -218,18 +231,22 @@ def print_file_contents(
 
     streamed_outputs: dict[Path, FileStreamResult] = {}
     for file_path in files:
-        print(f"===== 파일: {file_path} =====")
+        print(f"[{_format_local_timestamp()}] ===== 파일: {file_path} =====")
         cleaned_chunks: list[str] = []
         file_id = file_path.as_posix()
         decode_error: UnicodeDecodeError | None = None
         decoding_start_wall = datetime.now(timezone.utc)
         decoding_start_perf = perf_counter()
+        print(
+            f"[{_format_local_timestamp(decoding_start_wall)}] [단계 시작] 디코딩: {file_id}"
+        )
+        decoding_log: dict[str, Any] | None = None
         try:
             for chunk in stream_clean_lines(file_path, config=config):
                 cleaned_chunks.append(chunk)
         except UnicodeDecodeError as exc:  # pragma: no cover - CLI 도우미
             decode_error = exc
-            log_stage(
+            decoding_log = log_stage(
                 "decoding",
                 file_id=file_id,
                 start_wall=decoding_start_wall,
@@ -238,13 +255,18 @@ def print_file_contents(
                 error=str(exc),
             )
         else:
-            log_stage(
+            decoding_log = log_stage(
                 "decoding",
                 file_id=file_id,
                 start_wall=decoding_start_wall,
                 start_perf=decoding_start_perf,
                 status="ok",
                 line_count=len(cleaned_chunks),
+            )
+        if decoding_log is not None:
+            print(
+                f"[{decoding_log['local_timestamp']}] [단계 종료] 디코딩"
+                f"(status={decoding_log.get('status', 'unknown')})"
             )
         if decode_error is not None:
             print(f"[디코딩 오류] {file_path}을(를) 읽을 수 없습니다: {decode_error}")
@@ -253,15 +275,22 @@ def print_file_contents(
 
         streaming_start_wall = datetime.now(timezone.utc)
         streaming_start_perf = perf_counter()
+        print(
+            f"[{_format_local_timestamp(streaming_start_wall)}] [단계 시작] 스트리밍: {file_id}"
+        )
         for chunk in cleaned_chunks:
             print(chunk)
-        log_stage(
+        streaming_log = log_stage(
             "streaming",
             file_id=file_id,
             start_wall=streaming_start_wall,
             start_perf=streaming_start_perf,
             status="ok",
             line_count=len(cleaned_chunks),
+        )
+        print(
+            f"[{streaming_log['local_timestamp']}] [단계 종료] 스트리밍"
+            f"(status={streaming_log.get('status', 'unknown')})"
         )
 
         classification: str | None = None
@@ -271,12 +300,15 @@ def print_file_contents(
         ):
             llm_start_wall = datetime.now(timezone.utc)
             llm_start_perf = perf_counter()
+            print(
+                f"[{_format_local_timestamp(llm_start_wall)}] [단계 시작] LLM 분류: {file_id}"
+            )
             try:
                 classification = classify_file(
                     file_path, cleaned_chunks, llm_client
                 )
             except TransformerClientError as exc:  # pragma: no cover - CLI 도우미
-                log_stage(
+                llm_log = log_stage(
                     "llm_classification",
                     file_id=file_id,
                     start_wall=llm_start_wall,
@@ -286,7 +318,7 @@ def print_file_contents(
                 )
                 print(f"[LLM 오류] {exc}")
             else:
-                log_stage(
+                llm_log = log_stage(
                     "llm_classification",
                     file_id=file_id,
                     start_wall=llm_start_wall,
@@ -295,6 +327,10 @@ def print_file_contents(
                 )
                 if classification:
                     print(f"[LLM 분류] {classification}")
+            print(
+                f"[{llm_log['local_timestamp']}] [단계 종료] LLM 분류"
+                f"(status={llm_log.get('status', 'unknown')})"
+            )
 
         streamed_outputs[file_path] = FileStreamResult(
             cleaned_chunks=cleaned_chunks,
@@ -332,11 +368,15 @@ def main() -> int:
     discovery_start_wall = datetime.now(timezone.utc)
     discovery_start_perf = perf_counter()
     target_path = args.path.as_posix()
+    print(
+        f"[{_format_local_timestamp(discovery_start_wall)}] [단계 시작] 파일 검색: {target_path}"
+    )
+    discovery_log: dict[str, Any] | None = None
     try:
         files = find_target_files(args.path)
     except (FileNotFoundError, ValueError) as exc:
         discovery_error = exc
-        log_stage(
+        discovery_log = log_stage(
             "discovery",
             file_id=target_path,
             start_wall=discovery_start_wall,
@@ -346,7 +386,7 @@ def main() -> int:
             error=str(exc),
         )
     else:
-        log_stage(
+        discovery_log = log_stage(
             "discovery",
             file_id=target_path,
             start_wall=discovery_start_wall,
@@ -354,6 +394,11 @@ def main() -> int:
             target=target_path,
             status="ok",
             file_count=len(files),
+        )
+    if discovery_log is not None:
+        print(
+            f"[{discovery_log['local_timestamp']}] [단계 종료] 파일 검색"
+            f"(status={discovery_log.get('status', 'unknown')})"
         )
 
     if discovery_error is not None:
