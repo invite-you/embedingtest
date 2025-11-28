@@ -109,13 +109,25 @@ def test_build_embedding_payload_contains_metadata(tmp_path: Path) -> None:
 def test_split_text_by_newline_or_sentence() -> None:
     text = "첫 문장입니다. 두 번째 문장입니다!\n\n세 번째 줄"
 
-    segments = split_text_by_newline_or_sentence(text)
+    segments = split_text_by_newline_or_sentence(
+        text, min_chunk_size=10, max_chunk_size=80, overlap_size=5
+    )
 
-    assert segments == [
-        "첫 문장입니다.",
-        "두 번째 문장입니다!",
-        "세 번째 줄",
-    ]
+    assert segments == ["첫 문장입니다. 두 번째 문장입니다! 세 번째 줄"]
+
+
+def test_split_text_by_newline_or_sentence_builds_overlapping_chunks() -> None:
+    sentence = "이 문장은 청킹 테스트를 위한 문장입니다."
+    text = " ".join([sentence for _ in range(20)])
+
+    segments = split_text_by_newline_or_sentence(
+        text, min_chunk_size=50, max_chunk_size=80, overlap_size=10
+    )
+
+    assert len(segments) > 1
+    assert all(0 < len(chunk) <= 80 for chunk in segments)
+    for previous, current in zip(segments, segments[1:]):
+        assert previous[-10:] in current
 
 
 def test_torch_dtype_from_string_allows_prefixed_value() -> None:
