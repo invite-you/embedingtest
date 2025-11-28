@@ -56,3 +56,18 @@ CLI 내부에서는 여전히 동일한 임베딩 파이프라인(토큰화→�
 
 `python cli.py data`만으로도 각 파일별 대표 블록을 터미널에서 곧바로 확인할 수 있습니다.
 
+## 폴더 단위 파일 클러스터링 CLI
+
+`file_cluster_cli.py`는 폴더 경로를 입력받아 각 파일의 전체 텍스트를 `mdbr-leaf-ir` 임베딩으로 변환하고,
+HDBSCAN을 사용해 유사한 파일끼리 자동으로 묶어 줍니다.
+HDBSCAN이 노이즈로 판단한 파일도 `noise`라는 별도 클러스터로 함께 출력되므로 모든 파일이 어느 그룹에 속했는지 한눈에 확인할 수 있습니다.
+
+```bash
+python file_cluster_cli.py data --extensions .txt .md --min-cluster-size 2 --min-samples 1
+```
+
+* `--extensions`로 대상 확장자를 원하는 만큼 지정할 수 있습니다.
+* 기본 임베딩 모델은 `mdbr-leaf-ir`이며, `--model`로 다른 이름을 전달하면 즉시 교체됩니다.
+* `--min-cluster-size`, `--min-samples`를 조절해 클러스터링 민감도를 바꿀 수 있습니다.
+* 실행 전 `pip install hdbscan numpy`로 필요한 라이브러리를 설치해 주세요.
+
